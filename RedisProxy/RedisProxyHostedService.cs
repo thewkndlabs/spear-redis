@@ -6,6 +6,7 @@ namespace spearedis.RedisProxy;
 public sealed class RedisProxyHostedService : IHostedService, IDisposable
 {
     private readonly RedisCommandProcessor _commandProcessor;
+    private readonly IRedisUpstreamClient _upstreamClient;
     private readonly ILogger<RedisProxyHostedService> _logger;
     private readonly RedisProxyOptions _options;
 
@@ -14,17 +15,19 @@ public sealed class RedisProxyHostedService : IHostedService, IDisposable
 
     public RedisProxyHostedService(
         RedisCommandProcessor commandProcessor,
+        IRedisUpstreamClient upstreamClient,
         IOptions<RedisProxyOptions> options,
         ILogger<RedisProxyHostedService> logger)
     {
         _commandProcessor = commandProcessor;
+        _upstreamClient = upstreamClient;
         _logger = logger;
         _options = options.Value;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        ValidateOptions(_options);
+        await _upstreamClient.InitializeAsync(cancellationToken);
 
         _listener = new RespListener(_options.Port);
         _respInterface = new RespInterface(_listener)
@@ -57,6 +60,7 @@ public sealed class RedisProxyHostedService : IHostedService, IDisposable
         }
 
         _listener?.Dispose();
+        _upstreamClient.Dispose();
     }
 
     private string HandleArray(RespDataReceivedEventArgs args)
@@ -102,21 +106,5 @@ public sealed class RedisProxyHostedService : IHostedService, IDisposable
         }
 
         return false;
-    }
-
-    private static void ValidateOptions(RedisProxyOptions options)
-    {
-        if (options.Port is < 1 or > 65535)
-        {
-            throw new InvalidOperationException("RedisProxy:Port must be between 1 and 65535.");
-        }
-
-        var hasUsername = !string.IsNullOrWhiteSpace(options.AuthUsername);
-        var hasPassword = !string.IsNullOrWhiteSpace(options.AuthPassword);
-
-        if (hasUsername && !hasPassword)
-        {
-            throw new InvalidOperationException("RedisProxy auth configuration is invalid: AuthUsername requires AuthPassword.");
-        }
     }
 }

@@ -9,15 +9,22 @@ public sealed class RedisCommandProcessor
     private const string NullBulkString = "$-1\r\n";
     private const string NoAuth = "-NOAUTH Authentication required.\r\n";
     private const string WrongPass = "-WRONGPASS invalid username-password pair or user is disabled.\r\n";
+    private const string PrimaryWriteFailed = "-ERR primary write failed\r\n";
+    private const string PrimaryReadFailed = "-ERR primary read failed\r\n";
 
-    private readonly IStringKeyValueStore _store;
+    private readonly IRedisUpstreamClient _upstream;
     private readonly RedisProxyOptions _options;
+    private readonly ILogger<RedisCommandProcessor> _logger;
     private readonly ConcurrentDictionary<Guid, bool> _authenticatedClients = new();
 
-    public RedisCommandProcessor(IStringKeyValueStore store, IOptions<RedisProxyOptions> options)
+    public RedisCommandProcessor(
+        IRedisUpstreamClient upstream,
+        IOptions<RedisProxyOptions> options,
+        ILogger<RedisCommandProcessor> logger)
     {
-        _store = store;
+        _upstream = upstream;
         _options = options.Value;
+        _logger = logger;
     }
 
     public string Handle(Guid clientId, IReadOnlyList<string> arguments)
@@ -96,7 +103,20 @@ public sealed class RedisCommandProcessor
             return NoAuth;
         }
 
-        _store.Set(args[1], args[2]);
+        var key = args[1];
+        var value = args[2];
+
+        var setResult = _upstream.WriteToPrimary(key, value);
+        if (!setResult.Success)
+        {
+            return PrimaryWriteFailed;
+        }
+
+        var replicationTask = _upstream.ReplicateToSecondariesAsync(key, value);
+        _ = replicationTask.ContinueWith(
+            t => _logger.LogWarning(t.Exception, "Secondary replication task failed for key {Key}", key),
+            TaskContinuationOptions.OnlyOnFaulted);
+
         return Ok;
     }
 
@@ -112,12 +132,18 @@ public sealed class RedisCommandProcessor
             return NoAuth;
         }
 
-        var key = args[1];
-        if (!_store.TryGet(key, out var value) || value is null)
+        var readResult = _upstream.ReadFromPrimary(args[1]);
+        if (!readResult.Success)
+        {
+            return PrimaryReadFailed;
+        }
+
+        if (!readResult.Found || readResult.Value is null)
         {
             return NullBulkString;
         }
 
+        var value = readResult.Value;
         return $"${value.Length}\r\n{value}\r\n";
     }
 

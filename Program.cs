@@ -1,10 +1,12 @@
 using spearedis.RedisProxy;
+using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services
 	.AddOptions<RedisProxyOptions>()
 	.Bind(builder.Configuration.GetSection("RedisProxy"))
+	.ValidateOnStart()
 	.PostConfigure(options =>
 	{
 		var configuredPort = builder.Configuration.GetValue<int?>("RedisProxyPort")
@@ -15,8 +17,36 @@ builder.Services
 		{
 			options.Port = configuredPort.Value;
 		}
+
+		var primary = builder.Configuration["RedisProxyPrimaryConnectionString"]
+			?? builder.Configuration["redis-proxy-primary-connection-string"]
+			?? builder.Configuration["REDIS_PROXY_PRIMARY_CONNECTION_STRING"];
+
+		if (!string.IsNullOrWhiteSpace(primary))
+		{
+			options.PrimaryConnectionString = primary;
+		}
+
+		var secondaryListRaw = builder.Configuration["RedisProxySecondaryConnectionStrings"]
+			?? builder.Configuration["redis-proxy-secondary-connection-strings"]
+			?? builder.Configuration["REDIS_PROXY_SECONDARY_CONNECTION_STRINGS"];
+
+		if (!string.IsNullOrWhiteSpace(secondaryListRaw))
+		{
+			options.SecondaryConnectionStrings = SplitSecondaryConnectionStrings(secondaryListRaw);
+		}
+
+		var singleSecondary = builder.Configuration["RedisProxySecondaryConnectionString"]
+			?? builder.Configuration["redis-proxy-secondary-connection-string"]
+			?? builder.Configuration["REDIS_PROXY_SECONDARY_CONNECTION_STRING"];
+
+		if (!string.IsNullOrWhiteSpace(singleSecondary))
+		{
+			options.SecondaryConnectionStrings.Add(singleSecondary);
+		}
 	});
-builder.Services.AddSingleton<IStringKeyValueStore, InMemoryStringKeyValueStore>();
+builder.Services.AddSingleton<IValidateOptions<RedisProxyOptions>, RedisProxyOptionsValidator>();
+builder.Services.AddSingleton<IRedisUpstreamClient, RedisUpstreamClient>();
 builder.Services.AddSingleton<RedisCommandProcessor>();
 builder.Services.AddHostedService<RedisProxyHostedService>();
 
@@ -39,4 +69,12 @@ static int? TryParsePort(string? value)
 	}
 
 	throw new InvalidOperationException("REDIS_PROXY_PORT must be a valid integer.");
+}
+
+static List<string> SplitSecondaryConnectionStrings(string value)
+{
+	return value
+		.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+		.Where(v => !string.IsNullOrWhiteSpace(v))
+		.ToList();
 }

@@ -5,8 +5,6 @@
 /home/heiss/projects/dotnet/spearedis/tests/spearedis.Tests/bin/Debug/net10.0/spearedis.runtimeconfig.json
 /home/heiss/projects/dotnet/spearedis/tests/spearedis.Tests/bin/Debug/net10.0/appsettings.Development.json
 /home/heiss/projects/dotnet/spearedis/tests/spearedis.Tests/bin/Debug/net10.0/appsettings.json
-/home/heiss/projects/dotnet/spearedis/tests/spearedis.Tests/bin/Debug/net10.0/tests/spearedis.Tests/obj/project.assets.json
-/home/heiss/projects/dotnet/spearedis/tests/spearedis.Tests/bin/Debug/net10.0/tests/spearedis.Tests/obj/spearedis.Tests.csproj.nuget.dgspec.json
 /home/heiss/projects/dotnet/spearedis/tests/spearedis.Tests/bin/Debug/net10.0/spearedis.staticwebassets.endpoints.json
 /home/heiss/projects/dotnet/spearedis/tests/spearedis.Tests/bin/Debug/net10.0/spearedis
 /home/heiss/projects/dotnet/spearedis/tests/spearedis.Tests/bin/Debug/net10.0/xunit.runner.visualstudio.testadapter.dll
