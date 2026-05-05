@@ -107,3 +107,4 @@
 /home/heiss/projects/dotnet/spearedis/tests/spearedis.Tests/obj/Debug/net10.0/spearedis.Tests.pdb
 /home/heiss/projects/dotnet/spearedis/tests/spearedis.Tests/obj/Debug/net10.0/spearedis.Tests.genruntimeconfig.cache
 /home/heiss/projects/dotnet/spearedis/tests/spearedis.Tests/obj/Debug/net10.0/ref/spearedis.Tests.dll
+/home/heiss/projects/dotnet/spearedis/tests/spearedis.Tests/bin/Debug/net10.0/package.json

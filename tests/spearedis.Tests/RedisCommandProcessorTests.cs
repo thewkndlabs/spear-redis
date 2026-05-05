@@ -120,6 +120,59 @@ public sealed class RedisCommandProcessorTests
     }
 
     [Fact]
+    public void SetWithExAppliesSecondsExpiry()
+    {
+        var upstream = new FakeRedisUpstreamClient();
+        var processor = CreateProcessor(upstream);
+        var clientId = Guid.NewGuid();
+
+        var response = processor.Handle(clientId, ["SET", "ttl:key", "value", "EX", "60"]);
+
+        Assert.Equal("+OK\r\n", response);
+        Assert.Equal(TimeSpan.FromSeconds(60), upstream.LastExpiry);
+        Assert.Equal(TimeSpan.FromSeconds(60), upstream.LastReplicationExpiry);
+    }
+
+    [Fact]
+    public void SetWithPxAppliesMillisecondsExpiry()
+    {
+        var upstream = new FakeRedisUpstreamClient();
+        var processor = CreateProcessor(upstream);
+        var clientId = Guid.NewGuid();
+
+        var response = processor.Handle(clientId, ["SET", "ttl:key", "value", "PX", "1500"]);
+
+        Assert.Equal("+OK\r\n", response);
+        Assert.Equal(TimeSpan.FromMilliseconds(1500), upstream.LastExpiry);
+        Assert.Equal(TimeSpan.FromMilliseconds(1500), upstream.LastReplicationExpiry);
+    }
+
+    [Theory]
+    [InlineData("EX", "0")]
+    [InlineData("PX", "-1")]
+    [InlineData("EX", "abc")]
+    public void SetWithInvalidTtlValueReturnsIntegerError(string ttlOption, string ttlValue)
+    {
+        var processor = CreateProcessor(new FakeRedisUpstreamClient());
+        var clientId = Guid.NewGuid();
+
+        var response = processor.Handle(clientId, ["SET", "ttl:key", "value", ttlOption, ttlValue]);
+
+        Assert.Equal("-ERR value is not an integer or out of range\r\n", response);
+    }
+
+    [Fact]
+    public void SetWithUnsupportedOptionReturnsSyntaxError()
+    {
+        var processor = CreateProcessor(new FakeRedisUpstreamClient());
+        var clientId = Guid.NewGuid();
+
+        var response = processor.Handle(clientId, ["SET", "ttl:key", "value", "NX", "10"]);
+
+        Assert.Equal("-ERR syntax error\r\n", response);
+    }
+
+    [Fact]
     public void KeysReturnsMatchingKeysAsRespArray()
     {
         var upstream = new FakeRedisUpstreamClient
@@ -201,6 +254,8 @@ public sealed class RedisCommandProcessorTests
     [InlineData(new[] { "AUTH" }, "-ERR wrong number of arguments for 'auth' command\r\n")]
     [InlineData(new[] { "AUTH", "a", "b", "c" }, "-ERR wrong number of arguments for 'auth' command\r\n")]
     [InlineData(new[] { "SET", "k" }, "-ERR wrong number of arguments for 'set' command\r\n")]
+    [InlineData(new[] { "SET", "k", "v", "EX" }, "-ERR wrong number of arguments for 'set' command\r\n")]
+    [InlineData(new[] { "SET", "k", "v", "EX", "10", "XX" }, "-ERR wrong number of arguments for 'set' command\r\n")]
     [InlineData(new[] { "GET" }, "-ERR wrong number of arguments for 'get' command\r\n")]
     [InlineData(new[] { "KEYS" }, "-ERR wrong number of arguments for 'keys' command\r\n")]
     [InlineData(new[] { "PING", "a", "b" }, "-ERR wrong number of arguments for 'ping' command\r\n")]
@@ -315,6 +370,10 @@ public sealed class RedisCommandProcessorTests
 
         public string? LastSetKey { get; private set; }
 
+        public TimeSpan? LastExpiry { get; private set; }
+
+        public TimeSpan? LastReplicationExpiry { get; private set; }
+
         public int ReplicationCalls { get; private set; }
 
         public Task InitializeAsync(CancellationToken cancellationToken) => Task.CompletedTask;
@@ -330,16 +389,18 @@ public sealed class RedisCommandProcessorTests
             return KeysResult;
         }
 
-        public RedisWriteResult WriteToPrimary(string key, string value)
+        public RedisWriteResult WriteToPrimary(string key, string value, TimeSpan? expiry = null)
         {
             LastSetKey = key;
+            LastExpiry = expiry;
             return WriteResult;
         }
 
-        public Task ReplicateToSecondariesAsync(string key, string value, CancellationToken cancellationToken = default)
+        public Task ReplicateToSecondariesAsync(string key, string value, TimeSpan? expiry = null, CancellationToken cancellationToken = default)
         {
             ReplicationCalls++;
             LastSetKey = key;
+            LastReplicationExpiry = expiry;
             return ReplicationTaskFactory?.Invoke() ?? Task.CompletedTask;
         }
 

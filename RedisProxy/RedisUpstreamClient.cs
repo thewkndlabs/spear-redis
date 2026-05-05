@@ -124,7 +124,7 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
         }
     }
 
-    public RedisWriteResult WriteToPrimary(string key, string value)
+    public RedisWriteResult WriteToPrimary(string key, string value, TimeSpan? expiry = null)
     {
         var primary = _primary;
         if (!_initialized || primary is null)
@@ -134,7 +134,10 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
 
         try
         {
-            var setResult = primary.GetDatabase().StringSet(key, value);
+            var db = primary.GetDatabase();
+            var setResult = expiry.HasValue
+                ? db.StringSet(key, value, expiry.Value)
+                : db.StringSet(key, value);
             if (!setResult)
             {
                 return RedisWriteResult.Failed("Primary Redis write failed.");
@@ -149,14 +152,14 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
         }
     }
 
-    public async Task ReplicateToSecondariesAsync(string key, string value, CancellationToken cancellationToken = default)
+    public async Task ReplicateToSecondariesAsync(string key, string value, TimeSpan? expiry = null, CancellationToken cancellationToken = default)
     {
         if (!_initialized || _secondaries.Count == 0)
         {
             return;
         }
 
-        var tasks = _secondaries.Select((secondary, index) => ReplicateToSecondaryAsync(secondary, index, key, value, cancellationToken));
+        var tasks = _secondaries.Select((secondary, index) => ReplicateToSecondaryAsync(secondary, index, key, value, expiry, cancellationToken));
         await Task.WhenAll(tasks);
     }
 
@@ -177,11 +180,19 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
         }
     }
 
-    private async Task ReplicateToSecondaryAsync(ConnectionMultiplexer secondary, int index, string key, string value, CancellationToken cancellationToken)
+    private async Task ReplicateToSecondaryAsync(ConnectionMultiplexer secondary, int index, string key, string value, TimeSpan? expiry, CancellationToken cancellationToken)
     {
         try
         {
-            await secondary.GetDatabase().StringSetAsync(key, value);
+            var db = secondary.GetDatabase();
+            if (expiry.HasValue)
+            {
+                await db.StringSetAsync(key, value, expiry.Value);
+            }
+            else
+            {
+                await db.StringSetAsync(key, value);
+            }
             SecondaryReplicationSuccess.Add(1);
             _logger.LogInformation("Secondary replication succeeded for key {Key} on target {TargetIndex}", key, index);
         }

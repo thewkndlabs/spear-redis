@@ -8,7 +8,7 @@ public interface IRedisUpstreamClient : IDisposable
 
     RedisKeysResult KeysFromPrimary(string pattern);
 
-    RedisWriteResult WriteToPrimary(string key, string value);
+    RedisWriteResult WriteToPrimary(string key, string value, TimeSpan? expiry = null);
 
-    Task ReplicateToSecondariesAsync(string key, string value, CancellationToken cancellationToken = default);
+    Task ReplicateToSecondariesAsync(string key, string value, TimeSpan? expiry = null, CancellationToken cancellationToken = default);
 }

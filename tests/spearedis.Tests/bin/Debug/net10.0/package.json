@@ -1,0 +1,7 @@
+{
+  "name": "spearedis-tools",
+  "private": true,
+  "scripts": {
+    "stress:redis": "bun run scripts/redis-stress.ts"
+  }
+}

@@ -14,6 +14,8 @@ public sealed class RedisCommandProcessor
     private const string PrimaryWriteFailed = "-ERR primary write failed\r\n";
     private const string PrimaryReadFailed = "-ERR primary read failed\r\n";
     private const string PrimaryKeysFailed = "-ERR primary keys failed\r\n";
+    private const string SyntaxError = "-ERR syntax error\r\n";
+    private const string InvalidInteger = "-ERR value is not an integer or out of range\r\n";
 
     private readonly IRedisUpstreamClient _upstream;
     private readonly RedisProxyOptions _options;
@@ -104,7 +106,7 @@ public sealed class RedisCommandProcessor
 
     private string HandleSet(Guid clientId, IReadOnlyList<string> args)
     {
-        if (args.Count != 3)
+        if (args.Count is not (3 or 5))
         {
             return WrongArguments("set");
         }
@@ -117,13 +119,19 @@ public sealed class RedisCommandProcessor
         var key = args[1];
         var value = args[2];
 
-        var setResult = _upstream.WriteToPrimary(key, value);
+        var parseResult = TryParseSetExpiry(args, out var expiry);
+        if (parseResult is not null)
+        {
+            return parseResult;
+        }
+
+        var setResult = _upstream.WriteToPrimary(key, value, expiry);
         if (!setResult.Success)
         {
             return PrimaryWriteFailed;
         }
 
-        var replicationTask = _upstream.ReplicateToSecondariesAsync(key, value);
+        var replicationTask = _upstream.ReplicateToSecondariesAsync(key, value, expiry);
         _ = replicationTask.ContinueWith(
             t => _logger.LogWarning(t.Exception, "Secondary replication task failed for key {Key}", key),
             TaskContinuationOptions.OnlyOnFaulted);
@@ -319,5 +327,30 @@ public sealed class RedisCommandProcessor
     private static string WrongArguments(string command)
     {
         return $"-ERR wrong number of arguments for '{command}' command\r\n";
+    }
+
+    private static string? TryParseSetExpiry(IReadOnlyList<string> args, out TimeSpan? expiry)
+    {
+        expiry = null;
+
+        if (args.Count == 3)
+        {
+            return null;
+        }
+
+        var option = args[3].ToUpperInvariant();
+        if (!long.TryParse(args[4], out var ttlValue) || ttlValue <= 0)
+        {
+            return InvalidInteger;
+        }
+
+        expiry = option switch
+        {
+            "EX" => TimeSpan.FromSeconds(ttlValue),
+            "PX" => TimeSpan.FromMilliseconds(ttlValue),
+            _ => null
+        };
+
+        return expiry is null ? SyntaxError : null;
     }
 }
