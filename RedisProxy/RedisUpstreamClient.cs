@@ -94,6 +94,36 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
         }
     }
 
+    public RedisKeysResult KeysFromPrimary(string pattern)
+    {
+        var primary = _primary;
+        if (!_initialized || primary is null)
+        {
+            return RedisKeysResult.Failed("Redis upstream is not initialized.");
+        }
+
+        try
+        {
+            var endpoints = primary.GetEndPoints();
+            if (endpoints.Length == 0)
+            {
+                return RedisKeysResult.Failed("Primary Redis endpoint not available.");
+            }
+
+            var server = primary.GetServer(endpoints[0]);
+            var keys = server.Keys(pattern: pattern)
+                .Select(k => k.ToString())
+                .ToArray();
+
+            return RedisKeysResult.FromKeys(keys);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Primary Redis KEYS failed for pattern {Pattern}", pattern);
+            return RedisKeysResult.Failed("Primary Redis KEYS failed.");
+        }
+    }
+
     public RedisWriteResult WriteToPrimary(string key, string value)
     {
         var primary = _primary;

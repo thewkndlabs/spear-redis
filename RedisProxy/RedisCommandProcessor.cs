@@ -6,11 +6,14 @@ namespace spearedis.RedisProxy;
 public sealed class RedisCommandProcessor
 {
     private const string Ok = "+OK\r\n";
+    private const string Pong = "+PONG\r\n";
     private const string NullBulkString = "$-1\r\n";
+    private const string EmptyArray = "*0\r\n";
     private const string NoAuth = "-NOAUTH Authentication required.\r\n";
     private const string WrongPass = "-WRONGPASS invalid username-password pair or user is disabled.\r\n";
     private const string PrimaryWriteFailed = "-ERR primary write failed\r\n";
     private const string PrimaryReadFailed = "-ERR primary read failed\r\n";
+    private const string PrimaryKeysFailed = "-ERR primary keys failed\r\n";
 
     private readonly IRedisUpstreamClient _upstream;
     private readonly RedisProxyOptions _options;
@@ -41,6 +44,14 @@ public sealed class RedisCommandProcessor
             "AUTH" => HandleAuth(clientId, arguments),
             "SET" => HandleSet(clientId, arguments),
             "GET" => HandleGet(clientId, arguments),
+            "KEYS" => HandleKeys(clientId, arguments),
+            "PING" => HandlePing(arguments),
+            "ECHO" => HandleEcho(arguments),
+            "COMMAND" => HandleCommand(arguments),
+            "HELLO" => HandleHello(arguments),
+            "CLIENT" => HandleClient(arguments),
+            "SELECT" => HandleSelect(arguments),
+            "QUIT" => HandleQuit(arguments),
             _ => $"-ERR unknown command '{command.ToLowerInvariant()}'\r\n"
         };
     }
@@ -160,6 +171,149 @@ public sealed class RedisCommandProcessor
     private bool RequiresAuthentication()
     {
         return !string.IsNullOrWhiteSpace(_options.AuthPassword);
+    }
+
+    private string HandleKeys(Guid clientId, IReadOnlyList<string> args)
+    {
+        if (args.Count != 2)
+        {
+            return WrongArguments("keys");
+        }
+
+        if (!IsAuthorized(clientId))
+        {
+            return NoAuth;
+        }
+
+        var keysResult = _upstream.KeysFromPrimary(args[1]);
+        if (!keysResult.Success)
+        {
+            return PrimaryKeysFailed;
+        }
+
+        return ToRespArray(keysResult.Keys);
+    }
+
+    private static string HandlePing(IReadOnlyList<string> args)
+    {
+        return args.Count switch
+        {
+            1 => Pong,
+            2 => ToRespBulkString(args[1]),
+            _ => WrongArguments("ping")
+        };
+    }
+
+    private static string HandleEcho(IReadOnlyList<string> args)
+    {
+        if (args.Count != 2)
+        {
+            return WrongArguments("echo");
+        }
+
+        return ToRespBulkString(args[1]);
+    }
+
+    private static string HandleCommand(IReadOnlyList<string> args)
+    {
+        if (args.Count == 1)
+        {
+            return EmptyArray;
+        }
+
+        var subCommand = args[1].ToUpperInvariant();
+        return subCommand switch
+        {
+            "COUNT" when args.Count == 2 => ":0\r\n",
+            "INFO" or "DOCS" or "GETKEYS" when args.Count >= 2 => EmptyArray,
+            _ => UnsupportedSubcommand("command", args[1])
+        };
+    }
+
+    private static string HandleHello(IReadOnlyList<string> args)
+    {
+        if (args.Count is < 1 or > 7)
+        {
+            return WrongArguments("hello");
+        }
+
+        var protocol = "3";
+        if (args.Count >= 2)
+        {
+            if (args[1] is not ("2" or "3"))
+            {
+                return "-ERR NOPROTO unsupported protocol version\r\n";
+            }
+
+            protocol = args[1];
+        }
+
+        return $"%7\r\n+server\r\n+redis\r\n+version\r\n+7.0.0\r\n+proto\r\n:{protocol}\r\n+id\r\n:1\r\n+mode\r\n+standalone\r\n+role\r\n+master\r\n+modules\r\n*0\r\n";
+    }
+
+    private static string HandleClient(IReadOnlyList<string> args)
+    {
+        if (args.Count < 2)
+        {
+            return WrongArguments("client");
+        }
+
+        var subCommand = args[1].ToUpperInvariant();
+        return subCommand switch
+        {
+            "SETINFO" when args.Count == 4 => Ok,
+            "SETNAME" when args.Count == 3 => Ok,
+            "GETNAME" when args.Count == 2 => NullBulkString,
+            "ID" when args.Count == 2 => ":1\r\n",
+            _ => UnsupportedSubcommand("client", args[1])
+        };
+    }
+
+    private static string HandleSelect(IReadOnlyList<string> args)
+    {
+        if (args.Count != 2)
+        {
+            return WrongArguments("select");
+        }
+
+        return Ok;
+    }
+
+    private static string HandleQuit(IReadOnlyList<string> args)
+    {
+        if (args.Count != 1)
+        {
+            return WrongArguments("quit");
+        }
+
+        return Ok;
+    }
+
+    private static string ToRespBulkString(string value)
+    {
+        return $"${value.Length}\r\n{value}\r\n";
+    }
+
+    private static string ToRespArray(IReadOnlyList<string> values)
+    {
+        if (values.Count == 0)
+        {
+            return EmptyArray;
+        }
+
+        var builder = new System.Text.StringBuilder();
+        builder.Append('*').Append(values.Count).Append("\r\n");
+        foreach (var value in values)
+        {
+            builder.Append('$').Append(value.Length).Append("\r\n").Append(value).Append("\r\n");
+        }
+
+        return builder.ToString();
+    }
+
+    private static string UnsupportedSubcommand(string command, string subCommand)
+    {
+        return $"-ERR unsupported subcommand '{subCommand.ToLowerInvariant()}' for '{command}' command\r\n";
     }
 
     private static string WrongArguments(string command)

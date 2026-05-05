@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("spearedis.Tests")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+dba97f8531903b7af54b9255c1aae55ca714f10f")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+9373064d85f2f2d09d4bde7d0f88b034fbda296f")]
 [assembly: System.Reflection.AssemblyProductAttribute("spearedis.Tests")]
 [assembly: System.Reflection.AssemblyTitleAttribute("spearedis.Tests")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

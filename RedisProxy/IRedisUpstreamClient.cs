@@ -6,6 +6,8 @@ public interface IRedisUpstreamClient : IDisposable
 
     RedisReadResult ReadFromPrimary(string key);
 
+    RedisKeysResult KeysFromPrimary(string pattern);
+
     RedisWriteResult WriteToPrimary(string key, string value);
 
     Task ReplicateToSecondariesAsync(string key, string value, CancellationToken cancellationToken = default);

@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using RedisResp;
+using System.Text;
 
 namespace spearedis.RedisProxy;
 
@@ -11,7 +12,6 @@ public sealed class RedisProxyHostedService : IHostedService, IDisposable
     private readonly RedisProxyOptions _options;
 
     private RespListener? _listener;
-    private RespInterface? _respInterface;
 
     public RedisProxyHostedService(
         RedisCommandProcessor commandProcessor,
@@ -30,13 +30,9 @@ public sealed class RedisProxyHostedService : IHostedService, IDisposable
         await _upstreamClient.InitializeAsync(cancellationToken);
 
         _listener = new RespListener(_options.Port);
-        _respInterface = new RespInterface(_listener)
-        {
-            ArrayHandler = HandleArray
-        };
-
-        _respInterface.ClientDisconnected += OnClientDisconnected;
-        _respInterface.ErrorOccurred += OnErrorOccurred;
+        _listener.ArrayReceived += OnArrayReceived;
+        _listener.ClientDisconnected += OnClientDisconnected;
+        _listener.ErrorOccurred += OnErrorOccurred;
 
         await _listener.StartAsync(cancellationToken);
 
@@ -52,25 +48,55 @@ public sealed class RedisProxyHostedService : IHostedService, IDisposable
 
     public void Dispose()
     {
-        if (_respInterface is not null)
+        if (_listener is not null)
         {
-            _respInterface.ClientDisconnected -= OnClientDisconnected;
-            _respInterface.ErrorOccurred -= OnErrorOccurred;
-            _respInterface.Dispose();
+            _listener.ArrayReceived -= OnArrayReceived;
+            _listener.ClientDisconnected -= OnClientDisconnected;
+            _listener.ErrorOccurred -= OnErrorOccurred;
         }
 
         _listener?.Dispose();
         _upstreamClient.Dispose();
     }
 
-    private string HandleArray(RespDataReceivedEventArgs args)
+    private async void OnArrayReceived(object? sender, RespDataReceivedEventArgs args)
     {
+        string response;
+
         if (!TryGetCommandArguments(args.Value, out var commandArgs))
         {
-            return "-ERR unknown command ''\r\n";
+            response = "-ERR unknown command ''\r\n";
+        }
+        else
+        {
+            response = _commandProcessor.Handle(args.ClientGUID, commandArgs);
         }
 
-        return _commandProcessor.Handle(args.ClientGUID, commandArgs);
+        try
+        {
+            await SendResponseAsync(args.ClientGUID, response);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send RESP response to client {ClientGuid}", args.ClientGUID);
+        }
+    }
+
+    private async Task SendResponseAsync(Guid clientGuid, string response)
+    {
+        if (_listener is null)
+        {
+            return;
+        }
+
+        var clientInfo = _listener.RetrieveClientByGuid(clientGuid);
+        if (clientInfo?.TcpClient is null || !clientInfo.TcpClient.Connected)
+        {
+            return;
+        }
+
+        var bytes = Encoding.UTF8.GetBytes(response);
+        await clientInfo.TcpClient.GetStream().WriteAsync(bytes, 0, bytes.Length);
     }
 
     private void OnClientDisconnected(object? sender, ClientDisconnectedEventArgs args)
