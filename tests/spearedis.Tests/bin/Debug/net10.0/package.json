@@ -1,7 +1,10 @@
 {
   "name": "spearedis-tools",
   "private": true,
+  "dependencies": {
+    "redis": "^5.8.2"
+  },
   "scripts": {
-    "stress:redis": "bun run scripts/redis-stress.ts"
+    "stress:redis": "bun scripts/redis-stress.ts"
   }
 }

@@ -358,6 +358,10 @@ public sealed class RedisCommandProcessorTests
 
     private sealed class FakeRedisUpstreamClient : IRedisUpstreamClient
     {
+        public RedisTargetHealth PrimaryHealth { get; set; } = new("primary", "localhost:6379", true);
+
+        public IReadOnlyList<RedisTargetHealth> TopologyHealth { get; set; } = [new RedisTargetHealth("primary", "localhost:6379", true)];
+
         public RedisReadResult ReadResult { get; set; } = RedisReadResult.Missing();
 
         public RedisKeysResult KeysResult { get; set; } = RedisKeysResult.FromKeys([]);
@@ -377,6 +381,16 @@ public sealed class RedisCommandProcessorTests
         public int ReplicationCalls { get; private set; }
 
         public Task InitializeAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public RedisTargetHealth GetPrimaryHealth()
+        {
+            return PrimaryHealth;
+        }
+
+        public IReadOnlyList<RedisTargetHealth> GetTopologyHealth()
+        {
+            return TopologyHealth;
+        }
 
         public RedisReadResult ReadFromPrimary(string key)
         {

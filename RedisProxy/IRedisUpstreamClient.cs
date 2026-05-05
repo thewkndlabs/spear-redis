@@ -4,6 +4,10 @@ public interface IRedisUpstreamClient : IDisposable
 {
     Task InitializeAsync(CancellationToken cancellationToken);
 
+    RedisTargetHealth GetPrimaryHealth();
+
+    IReadOnlyList<RedisTargetHealth> GetTopologyHealth();
+
     RedisReadResult ReadFromPrimary(string key);
 
     RedisKeysResult KeysFromPrimary(string pattern);

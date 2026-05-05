@@ -1,4 +1,5 @@
 using System.Diagnostics.Metrics;
+using System.Net;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 
@@ -92,6 +93,42 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
             _logger.LogError(ex, "Primary Redis read failed for key {Key}", key);
             return RedisReadResult.Failed("Primary Redis read failed.");
         }
+    }
+
+    public RedisTargetHealth GetPrimaryHealth()
+    {
+        var primary = _primary;
+        var endpoint = primary is null
+            ? TryGetEndpointFromConnectionString(_options.PrimaryConnectionString)
+            : GetEndpointDisplay(primary);
+
+        return new RedisTargetHealth("primary", endpoint, _initialized && primary is not null && primary.IsConnected);
+    }
+
+    public IReadOnlyList<RedisTargetHealth> GetTopologyHealth()
+    {
+        var targets = new List<RedisTargetHealth>(1 + _options.SecondaryConnectionStrings.Count)
+        {
+            GetPrimaryHealth()
+        };
+
+        for (var i = 0; i < _options.SecondaryConnectionStrings.Count; i++)
+        {
+            var connectionString = _options.SecondaryConnectionStrings[i];
+            var endpoint = TryGetEndpointFromConnectionString(connectionString);
+            var isConnected = false;
+
+            if (_initialized && i < _secondaries.Count)
+            {
+                var secondary = _secondaries[i];
+                endpoint = GetEndpointDisplay(secondary);
+                isConnected = secondary.IsConnected;
+            }
+
+            targets.Add(new RedisTargetHealth("secondary", endpoint, isConnected));
+        }
+
+        return targets;
     }
 
     public RedisKeysResult KeysFromPrimary(string pattern)
@@ -203,5 +240,46 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private static string GetEndpointDisplay(ConnectionMultiplexer multiplexer)
+    {
+        var endpoint = multiplexer.GetEndPoints().FirstOrDefault();
+        if (endpoint is null)
+        {
+            return "unknown";
+        }
+
+        return FormatEndpoint(endpoint);
+    }
+
+    private static string TryGetEndpointFromConnectionString(string connectionString)
+    {
+        try
+        {
+            var options = ConfigurationOptions.Parse(connectionString);
+            var endpoint = options.EndPoints.FirstOrDefault();
+            if (endpoint is null)
+            {
+                return "unknown";
+            }
+
+            return FormatEndpoint(endpoint);
+        }
+        catch
+        {
+            var raw = connectionString.Split(',', 2, StringSplitOptions.TrimEntries)[0];
+            return string.IsNullOrWhiteSpace(raw) ? "unknown" : raw;
+        }
+    }
+
+    private static string FormatEndpoint(EndPoint endpoint)
+    {
+        return endpoint switch
+        {
+            DnsEndPoint dns => $"{dns.Host}:{dns.Port}",
+            IPEndPoint ip => $"{ip.Address}:{ip.Port}",
+            _ => endpoint.ToString() ?? "unknown"
+        };
     }
 }

@@ -47,12 +47,31 @@ builder.Services
 	});
 builder.Services.AddSingleton<IValidateOptions<RedisProxyOptions>, RedisProxyOptionsValidator>();
 builder.Services.AddSingleton<IRedisUpstreamClient, RedisUpstreamClient>();
+builder.Services.AddSingleton<RedisHealthService>();
 builder.Services.AddSingleton<RedisCommandProcessor>();
 builder.Services.AddHostedService<RedisProxyHostedService>();
 
 var app = builder.Build();
 
 app.MapGet("/", () => "Hello World!");
+
+app.MapGet("/health/live", (RedisHealthService healthService) =>
+{
+	return Results.Ok(healthService.GetLiveness());
+});
+
+app.MapGet("/health/ready", (RedisHealthService healthService) =>
+{
+	var readiness = healthService.GetReadiness();
+	return readiness.IsReady
+		? Results.Ok(readiness.Response)
+		: Results.Json(readiness.Response, statusCode: StatusCodes.Status503ServiceUnavailable);
+});
+
+app.MapGet("/health/full", (RedisHealthService healthService) =>
+{
+	return Results.Ok(healthService.GetFull());
+});
 
 app.Run();
 

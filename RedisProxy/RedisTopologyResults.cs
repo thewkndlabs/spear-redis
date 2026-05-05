@@ -22,3 +22,5 @@ public readonly record struct RedisWriteResult(bool Success, string? Error)
 
     public static RedisWriteResult Failed(string error) => new(false, error);
 }
+
+public readonly record struct RedisTargetHealth(string Role, string Endpoint, bool Connected);
