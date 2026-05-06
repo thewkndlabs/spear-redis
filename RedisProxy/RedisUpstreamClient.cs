@@ -11,18 +11,27 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
     private static readonly Counter<long> SecondaryReplicationSuccess = Meter.CreateCounter<long>("redisproxy.secondary.replication.success");
     private static readonly Counter<long> SecondaryReplicationFailure = Meter.CreateCounter<long>("redisproxy.secondary.replication.failure");
 
-    private readonly RedisProxyOptions _options;
+    private RedisProxyOptions _options;
+    private readonly IOptionsMonitor<RedisProxyOptions> _optionsMonitor;
+    private readonly SecondaryTopologyManager _secondaryTopology;
     private readonly ILogger<RedisUpstreamClient> _logger;
+    private readonly IDisposable? _optionsReloadSubscription;
 
     private readonly object _sync = new();
     private bool _initialized;
     private ConnectionMultiplexer? _primary;
-    private readonly List<ConnectionMultiplexer> _secondaries = [];
+    private bool _disposed;
 
-    public RedisUpstreamClient(IOptions<RedisProxyOptions> options, ILogger<RedisUpstreamClient> logger)
+    public RedisUpstreamClient(
+        IOptionsMonitor<RedisProxyOptions> optionsMonitor,
+        SecondaryTopologyManager secondaryTopology,
+        ILogger<RedisUpstreamClient> logger)
     {
-        _options = options.Value;
+        _optionsMonitor = optionsMonitor;
+        _options = optionsMonitor.CurrentValue;
+        _secondaryTopology = secondaryTopology;
         _logger = logger;
+        _optionsReloadSubscription = optionsMonitor.OnChange(OnOptionsChanged);
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken)
@@ -38,36 +47,24 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
         cancellationToken.ThrowIfCancellationRequested();
 
         var primary = await ConnectionMultiplexer.ConnectAsync(_options.PrimaryConnectionString);
-
-        var secondaries = new List<ConnectionMultiplexer>(_options.SecondaryConnectionStrings.Count);
-        foreach (var secondaryConnectionString in _options.SecondaryConnectionStrings)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var secondary = await ConnectionMultiplexer.ConnectAsync(secondaryConnectionString);
-            secondaries.Add(secondary);
-        }
+        await _secondaryTopology.InitializeAsync(_options.SecondaryConnectionStrings, cancellationToken);
 
         lock (_sync)
         {
             if (_initialized)
             {
                 primary.Dispose();
-                foreach (var secondary in secondaries)
-                {
-                    secondary.Dispose();
-                }
 
                 return;
             }
 
             _primary = primary;
-            _secondaries.AddRange(secondaries);
             _initialized = true;
         }
 
         _logger.LogInformation(
             "Initialized Redis upstream topology with primary and {SecondaryCount} secondaries",
-            _secondaries.Count);
+            _secondaryTopology.Count);
     }
 
     public RedisReadResult ReadFromPrimary(string key)
@@ -107,26 +104,12 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
 
     public IReadOnlyList<RedisTargetHealth> GetTopologyHealth()
     {
-        var targets = new List<RedisTargetHealth>(1 + _options.SecondaryConnectionStrings.Count)
+        var targets = new List<RedisTargetHealth>(1 + _secondaryTopology.Count)
         {
             GetPrimaryHealth()
         };
 
-        for (var i = 0; i < _options.SecondaryConnectionStrings.Count; i++)
-        {
-            var connectionString = _options.SecondaryConnectionStrings[i];
-            var endpoint = TryGetEndpointFromConnectionString(connectionString);
-            var isConnected = false;
-
-            if (_initialized && i < _secondaries.Count)
-            {
-                var secondary = _secondaries[i];
-                endpoint = GetEndpointDisplay(secondary);
-                isConnected = secondary.IsConnected;
-            }
-
-            targets.Add(new RedisTargetHealth("secondary", endpoint, isConnected));
-        }
+        targets.AddRange(_secondaryTopology.GetHealth());
 
         return targets;
     }
@@ -191,12 +174,13 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
 
     public async Task ReplicateToSecondariesAsync(string key, string value, TimeSpan? expiry = null, CancellationToken cancellationToken = default)
     {
-        if (!_initialized || _secondaries.Count == 0)
+        if (!_initialized || _secondaryTopology.Count == 0)
         {
             return;
         }
 
-        var tasks = _secondaries.Select((secondary, index) => ReplicateToSecondaryAsync(secondary, index, key, value, expiry, cancellationToken));
+        var targets = _secondaryTopology.GetReplicationTargets();
+        var tasks = targets.Select((target, index) => ReplicateToSecondaryAsync(target, index, key, value, expiry, cancellationToken));
         await Task.WhenAll(tasks);
     }
 
@@ -204,32 +188,51 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
     {
         lock (_sync)
         {
-            _primary?.Dispose();
-            _primary = null;
-
-            foreach (var secondary in _secondaries)
+            if (_disposed)
             {
-                secondary.Dispose();
+                return;
             }
 
-            _secondaries.Clear();
+            _disposed = true;
+
+            _primary?.Dispose();
+            _primary = null;
             _initialized = false;
+        }
+
+        _optionsReloadSubscription?.Dispose();
+        _secondaryTopology.Dispose();
+    }
+
+    private async void OnOptionsChanged(RedisProxyOptions? options)
+    {
+        if (options is null)
+        {
+            return;
+        }
+
+        _options = options;
+
+        if (!_initialized || _disposed)
+        {
+            return;
+        }
+
+        try
+        {
+            await _secondaryTopology.ReloadAsync(options.SecondaryConnectionStrings, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Secondary topology reload failed.");
         }
     }
 
-    private async Task ReplicateToSecondaryAsync(ConnectionMultiplexer secondary, int index, string key, string value, TimeSpan? expiry, CancellationToken cancellationToken)
+    private async Task ReplicateToSecondaryAsync(ISecondaryRedisClient secondary, int index, string key, string value, TimeSpan? expiry, CancellationToken cancellationToken)
     {
         try
         {
-            var db = secondary.GetDatabase();
-            if (expiry.HasValue)
-            {
-                await db.StringSetAsync(key, value, expiry.Value);
-            }
-            else
-            {
-                await db.StringSetAsync(key, value);
-            }
+            await secondary.SetStringAsync(key, value, expiry, cancellationToken);
             SecondaryReplicationSuccess.Add(1);
             _logger.LogInformation("Secondary replication succeeded for key {Key} on target {TargetIndex}", key, index);
         }
@@ -238,8 +241,6 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
             SecondaryReplicationFailure.Add(1);
             _logger.LogWarning(ex, "Secondary replication failed for key {Key} on target {TargetIndex}", key, index);
         }
-
-        cancellationToken.ThrowIfCancellationRequested();
     }
 
     private static string GetEndpointDisplay(ConnectionMultiplexer multiplexer)

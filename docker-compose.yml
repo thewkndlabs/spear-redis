@@ -1,0 +1,39 @@
+services:
+  redis-primary:
+    image: redis:7.4-alpine
+    container_name: spearedis-redis-primary
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis-secondary-1:
+    image: redis:7.4-alpine
+    container_name: spearedis-redis-secondary-1
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spearedis-proxy
+    depends_on:
+      redis-primary:
+        condition: service_healthy
+      redis-secondary-1:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      REDIS_PROXY_PORT: 9379
+      REDIS_PROXY_PRIMARY_CONNECTION_STRING: redis-primary:6379
+      REDIS_PROXY_SECONDARY_CONNECTION_STRINGS: redis-secondary-1:6379
+    ports:
+      - "18080:8080"
+      - "19379:9379"
