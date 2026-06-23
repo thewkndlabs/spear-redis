@@ -18,27 +18,27 @@ builder.Services
 			options.Port = configuredPort.Value;
 		}
 
-		var primary = builder.Configuration["RedisProxyPrimaryConnectionString"]
+		var primary = builder.Configuration["REDIS_PROXY_PRIMARY_CONNECTION_STRING"]
 			?? builder.Configuration["redis-proxy-primary-connection-string"]
-			?? builder.Configuration["REDIS_PROXY_PRIMARY_CONNECTION_STRING"];
+			?? builder.Configuration["RedisProxyPrimaryConnectionString"];
 
 		if (!string.IsNullOrWhiteSpace(primary))
 		{
 			options.PrimaryConnectionString = primary;
 		}
 
-		var secondaryListRaw = builder.Configuration["RedisProxySecondaryConnectionStrings"]
+		var secondaryListRaw = builder.Configuration["REDIS_PROXY_SECONDARY_CONNECTION_STRINGS"]
 			?? builder.Configuration["redis-proxy-secondary-connection-strings"]
-			?? builder.Configuration["REDIS_PROXY_SECONDARY_CONNECTION_STRINGS"];
+			?? builder.Configuration["RedisProxySecondaryConnectionStrings"];
 
 		if (!string.IsNullOrWhiteSpace(secondaryListRaw))
 		{
 			options.SecondaryConnectionStrings = SplitSecondaryConnectionStrings(secondaryListRaw);
 		}
 
-		var singleSecondary = builder.Configuration["RedisProxySecondaryConnectionString"]
+		var singleSecondary = builder.Configuration["REDIS_PROXY_SECONDARY_CONNECTION_STRING"]
 			?? builder.Configuration["redis-proxy-secondary-connection-string"]
-			?? builder.Configuration["REDIS_PROXY_SECONDARY_CONNECTION_STRING"];
+			?? builder.Configuration["RedisProxySecondaryConnectionString"];
 
 		if (!string.IsNullOrWhiteSpace(singleSecondary))
 		{
