@@ -32,31 +32,49 @@ public sealed class SecondaryTopologyManager : IDisposable
         return snapshot.Select(entry => entry.Client).ToArray();
     }
 
-    public async Task InitializeAsync(IReadOnlyList<string> connectionStrings, CancellationToken cancellationToken)
+    public async Task<SecondaryInitializationResult> InitializeAsync(IReadOnlyList<string> connectionStrings, CancellationToken cancellationToken)
     {
         var newEntries = new List<SecondaryEntry>(connectionStrings.Count);
-        try
+        var failedCount = 0;
+
+        foreach (var connectionString in connectionStrings)
         {
-            foreach (var connectionString in connectionStrings)
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!TryGetEndpointKey(connectionString, out var endpointKey))
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var endpointKey = GetEndpointKey(connectionString);
+                failedCount++;
+                _logger.LogWarning(
+                    "Secondary topology initialization skipped invalid endpoint {Endpoint}",
+                    SanitizeEndpointIdentity(connectionString));
+                continue;
+            }
+
+            try
+            {
                 var client = await _factory.ConnectAsync(connectionString, cancellationToken);
                 newEntries.Add(new SecondaryEntry(endpointKey, connectionString, client));
             }
-        }
-        catch
-        {
-            foreach (var entry in newEntries)
+            catch (OperationCanceledException)
             {
-                entry.Client.Dispose();
+                throw;
             }
-
-            throw;
+            catch (Exception ex)
+            {
+                failedCount++;
+                _logger.LogWarning(ex, "Secondary topology initialization failed for endpoint {Endpoint}", endpointKey);
+            }
         }
 
         var oldEntries = Interlocked.Exchange(ref _entries, newEntries.ToArray());
         DisposeEntries(oldEntries);
+
+        return new SecondaryInitializationResult(connectionStrings.Count, newEntries.Count, failedCount);
+    }
+
+    public readonly record struct SecondaryInitializationResult(int DesiredCount, int ConnectedCount, int FailedCount)
+    {
+        public bool IsDegraded => FailedCount > 0;
     }
 
     public async Task ReloadAsync(IReadOnlyList<string> desiredConnectionStrings, CancellationToken cancellationToken)
@@ -74,8 +92,8 @@ public sealed class SecondaryTopologyManager : IDisposable
                 if (!TryGetEndpointKey(connectionString, out var endpointKey))
                 {
                     _logger.LogWarning(
-                        "Secondary topology reload skipped invalid endpoint connection string: {ConnectionString}",
-                        connectionString);
+                        "Secondary topology reload skipped invalid endpoint {Endpoint}",
+                        SanitizeEndpointIdentity(connectionString));
                     continue;
                 }
 
@@ -185,9 +203,25 @@ public sealed class SecondaryTopologyManager : IDisposable
         }
         catch
         {
-            var raw = connectionString.Split(',', 2, StringSplitOptions.TrimEntries)[0];
-            return string.IsNullOrWhiteSpace(raw) ? "unknown" : raw;
+            return SanitizeEndpointIdentity(connectionString);
         }
+    }
+
+    private static string SanitizeEndpointIdentity(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "unknown";
+        }
+
+        var firstSegment = value.Split(',', 2, StringSplitOptions.TrimEntries)[0];
+        var credentialsSeparator = firstSegment.LastIndexOf('@');
+        if (credentialsSeparator >= 0 && credentialsSeparator < firstSegment.Length - 1)
+        {
+            firstSegment = firstSegment[(credentialsSeparator + 1)..];
+        }
+
+        return string.IsNullOrWhiteSpace(firstSegment) ? "unknown" : firstSegment;
     }
 
     private static void DisposeEntries(IEnumerable<SecondaryEntry> entries)

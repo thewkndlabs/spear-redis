@@ -47,7 +47,9 @@ builder.Services
 	});
 builder.Services.AddSingleton<IValidateOptions<RedisProxyOptions>, RedisProxyOptionsValidator>();
 builder.Services.AddSingleton<ISecondaryRedisClientFactory, StackExchangeSecondaryRedisClientFactory>();
+builder.Services.AddSingleton<ISecondaryReplayQueueStore, SqliteSecondaryReplayQueueStore>();
 builder.Services.AddSingleton<SecondaryTopologyManager>();
+builder.Services.AddSingleton<SecondaryReplayProcessor>();
 builder.Services.AddSingleton<IRedisUpstreamClient, RedisUpstreamClient>();
 builder.Services.AddSingleton<RedisHealthService>();
 builder.Services.AddSingleton<RedisCommandProcessor>();

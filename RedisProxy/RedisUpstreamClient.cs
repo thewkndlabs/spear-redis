@@ -14,6 +14,8 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
     private RedisProxyOptions _options;
     private readonly IOptionsMonitor<RedisProxyOptions> _optionsMonitor;
     private readonly SecondaryTopologyManager _secondaryTopology;
+    private readonly ISecondaryReplayQueueStore _replayQueueStore;
+    private readonly SecondaryReplayProcessor _replayProcessor;
     private readonly ILogger<RedisUpstreamClient> _logger;
     private readonly IDisposable? _optionsReloadSubscription;
 
@@ -21,15 +23,21 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
     private bool _initialized;
     private ConnectionMultiplexer? _primary;
     private bool _disposed;
+    private CancellationTokenSource? _replayLoopCts;
+    private Task? _replayLoopTask;
 
     public RedisUpstreamClient(
         IOptionsMonitor<RedisProxyOptions> optionsMonitor,
         SecondaryTopologyManager secondaryTopology,
+        ISecondaryReplayQueueStore replayQueueStore,
+        SecondaryReplayProcessor replayProcessor,
         ILogger<RedisUpstreamClient> logger)
     {
         _optionsMonitor = optionsMonitor;
         _options = optionsMonitor.CurrentValue;
         _secondaryTopology = secondaryTopology;
+        _replayQueueStore = replayQueueStore;
+        _replayProcessor = replayProcessor;
         _logger = logger;
         _optionsReloadSubscription = optionsMonitor.OnChange(OnOptionsChanged);
     }
@@ -46,8 +54,10 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
 
         cancellationToken.ThrowIfCancellationRequested();
 
+        await _replayQueueStore.InitializeAsync(cancellationToken);
+
         var primary = await ConnectionMultiplexer.ConnectAsync(_options.PrimaryConnectionString);
-        await _secondaryTopology.InitializeAsync(_options.SecondaryConnectionStrings, cancellationToken);
+        var secondaryInitialization = await _secondaryTopology.InitializeAsync(_options.SecondaryConnectionStrings, cancellationToken);
 
         lock (_sync)
         {
@@ -60,11 +70,29 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
 
             _primary = primary;
             _initialized = true;
+
+            if (_replayLoopTask is null)
+            {
+                _replayLoopCts = new CancellationTokenSource();
+                _replayLoopTask = Task.Run(() => RunReplayLoopAsync(_replayLoopCts.Token));
+            }
         }
 
         _logger.LogInformation(
-            "Initialized Redis upstream topology with primary and {SecondaryCount} secondaries",
-            _secondaryTopology.Count);
+            "Initialized Redis upstream topology. Primary={PrimaryEndpoint}, SecondaryConnected={SecondaryConnected}, SecondaryFailed={SecondaryFailed}, SecondaryDesired={SecondaryDesired}",
+            GetEndpointDisplay(primary),
+            secondaryInitialization.ConnectedCount,
+            secondaryInitialization.FailedCount,
+            secondaryInitialization.DesiredCount);
+
+        if (secondaryInitialization.IsDegraded)
+        {
+            _logger.LogWarning(
+                "Redis upstream started in degraded secondary mode. SecondaryConnected={SecondaryConnected}, SecondaryFailed={SecondaryFailed}, SecondaryDesired={SecondaryDesired}",
+                secondaryInitialization.ConnectedCount,
+                secondaryInitialization.FailedCount,
+                secondaryInitialization.DesiredCount);
+        }
     }
 
     public RedisReadResult ReadFromPrimary(string key)
@@ -186,6 +214,9 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
 
     public void Dispose()
     {
+        Task? replayLoopTask = null;
+        CancellationTokenSource? replayLoopCts = null;
+
         lock (_sync)
         {
             if (_disposed)
@@ -198,9 +229,30 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
             _primary?.Dispose();
             _primary = null;
             _initialized = false;
+
+            replayLoopTask = _replayLoopTask;
+            replayLoopCts = _replayLoopCts;
+            _replayLoopTask = null;
+            _replayLoopCts = null;
         }
 
         _optionsReloadSubscription?.Dispose();
+        replayLoopCts?.Cancel();
+        if (replayLoopTask is not null)
+        {
+            try
+            {
+                replayLoopTask.GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch
+            {
+            }
+        }
+
+        replayLoopCts?.Dispose();
         _secondaryTopology.Dispose();
     }
 
@@ -230,16 +282,80 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
 
     private async Task ReplicateToSecondaryAsync(ISecondaryRedisClient secondary, int index, string key, string value, TimeSpan? expiry, CancellationToken cancellationToken)
     {
+        var endpoint = SanitizeEndpointIdentity(secondary.Endpoint);
+
         try
         {
             await secondary.SetStringAsync(key, value, expiry, cancellationToken);
             SecondaryReplicationSuccess.Add(1);
-            _logger.LogInformation("Secondary replication succeeded for key {Key} on target {TargetIndex}", key, index);
+            _logger.LogInformation(
+                "Secondary replication succeeded during SET for key {Key} on endpoint {Endpoint} (target index {TargetIndex})",
+                key,
+                endpoint,
+                index);
         }
         catch (Exception ex)
         {
             SecondaryReplicationFailure.Add(1);
-            _logger.LogWarning(ex, "Secondary replication failed for key {Key} on target {TargetIndex}", key, index);
+            _logger.LogWarning(
+                ex,
+                "Secondary replication failed during SET for key {Key} on endpoint {Endpoint} (target index {TargetIndex})",
+                key,
+                endpoint,
+                index);
+
+            try
+            {
+                var queuedId = await _replayQueueStore.EnqueueAsync(key, value, endpoint, expiry, cancellationToken);
+                _logger.LogInformation(
+                    "Queued failed secondary replication event {QueueEventId} for key {Key} on endpoint {Endpoint}",
+                    queuedId,
+                    key,
+                    endpoint);
+            }
+            catch (Exception queueEx)
+            {
+                _logger.LogWarning(
+                    queueEx,
+                    "Failed to queue secondary replication event for key {Key} on endpoint {Endpoint}",
+                    key,
+                    endpoint);
+            }
+        }
+    }
+
+    private async Task RunReplayLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var snapshot = _options;
+                await _replayProcessor.ReplayDueEventsAsync(
+                    snapshot.ReplayBatchSize,
+                    TimeSpan.FromMilliseconds(snapshot.ReplayRetryBackoffMilliseconds),
+                    cancellationToken);
+
+                await Task.Delay(snapshot.ReplayIntervalMilliseconds, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Secondary replay loop iteration failed");
+
+                try
+                {
+                    var delayMs = Math.Max(100, _options.ReplayIntervalMilliseconds);
+                    await Task.Delay(delayMs, cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
         }
     }
 
@@ -269,9 +385,25 @@ public sealed class RedisUpstreamClient : IRedisUpstreamClient
         }
         catch
         {
-            var raw = connectionString.Split(',', 2, StringSplitOptions.TrimEntries)[0];
-            return string.IsNullOrWhiteSpace(raw) ? "unknown" : raw;
+            return SanitizeEndpointIdentity(connectionString);
         }
+    }
+
+    private static string SanitizeEndpointIdentity(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "unknown";
+        }
+
+        var firstSegment = value.Split(',', 2, StringSplitOptions.TrimEntries)[0];
+        var credentialsSeparator = firstSegment.LastIndexOf('@');
+        if (credentialsSeparator >= 0 && credentialsSeparator < firstSegment.Length - 1)
+        {
+            firstSegment = firstSegment[(credentialsSeparator + 1)..];
+        }
+
+        return string.IsNullOrWhiteSpace(firstSegment) ? "unknown" : firstSegment;
     }
 
     private static string FormatEndpoint(EndPoint endpoint)

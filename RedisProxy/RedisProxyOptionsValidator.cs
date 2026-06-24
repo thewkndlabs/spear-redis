@@ -38,6 +38,26 @@ public sealed class RedisProxyOptionsValidator : IValidateOptions<RedisProxyOpti
             }
         }
 
+        if (string.IsNullOrWhiteSpace(options.ReplayQueueSqlitePath))
+        {
+            return ValidateOptionsResult.Fail("RedisProxy:ReplayQueueSqlitePath is required.");
+        }
+
+        if (options.ReplayBatchSize <= 0)
+        {
+            return ValidateOptionsResult.Fail("RedisProxy:ReplayBatchSize must be greater than 0.");
+        }
+
+        if (options.ReplayIntervalMilliseconds <= 0)
+        {
+            return ValidateOptionsResult.Fail("RedisProxy:ReplayIntervalMilliseconds must be greater than 0.");
+        }
+
+        if (options.ReplayRetryBackoffMilliseconds <= 0)
+        {
+            return ValidateOptionsResult.Fail("RedisProxy:ReplayRetryBackoffMilliseconds must be greater than 0.");
+        }
+
         return ValidateOptionsResult.Success;
     }
 

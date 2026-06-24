@@ -12,6 +12,8 @@ public interface ISecondaryRedisClient : IDisposable
     bool IsConnected { get; }
 
     Task SetStringAsync(string key, string value, TimeSpan? expiry, CancellationToken cancellationToken);
+
+    Task<string?> GetStringAsync(string key, CancellationToken cancellationToken);
 }
 
 public interface ISecondaryRedisClientFactory
@@ -55,6 +57,14 @@ public sealed class StackExchangeSecondaryRedisClientFactory : ISecondaryRedisCl
             }
 
             await db.StringSetAsync(key, value);
+        }
+
+        public async Task<string?> GetStringAsync(string key, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var db = _multiplexer.GetDatabase();
+            var value = await db.StringGetAsync(key);
+            return value.HasValue ? value.ToString() : null;
         }
 
         public void Dispose()
